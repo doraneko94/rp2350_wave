@@ -75,7 +75,7 @@ fn main() -> ! {
     let mut a = Assembler::<32>::new();
     let mut wrap_target = a.label();
     let mut wrap_source = a.label();
-    a.set(pio::SetDestination::PINDIRS, 1);
+    a.set(pio::SetDestination::PINDIRS, (1<<12) - 1);
     a.bind(&mut wrap_target);
     a.pull(true, false);
     a.out(pio::OutDestination::PINS, DAC_BITS);
@@ -113,7 +113,7 @@ fn main() -> ! {
         let elapsed_ticks = now.wrapping_sub(t0);
         let elapsed_us: u64 = elapsed_ticks;
 
-        /*let consumed: u64 = elapsed_us * (OUTPUT_HZ as u64) / ticks_per_sec;
+        let consumed: u64 = elapsed_us * (OUTPUT_HZ as u64) / ticks_per_sec;
 
         while produced.saturating_sub(consumed) > 16u64 {
             let now2 = timer.get_counter().ticks();
@@ -134,11 +134,6 @@ fn main() -> ! {
 
         tx.write(sample as u32);
 
-        produced += 1;*/
-        if elapsed_us / 500_000 % 2 == 0 {
-            tx.write(DAC_MAX);
-        } else {
-            tx.write(0);
-        }
+        produced += 1;
     }
 }

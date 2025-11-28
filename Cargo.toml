@@ -10,3 +10,31 @@ embedded-hal = "1.0.0"
 panic-halt = "1.0.0"
 pio = "0.2.1"
 rp235x-hal = { version = "0.3.0", features = ["critical-section-impl"] }
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[[bin]]
+name = "blinky"
+path = "src/blinky.rs"
+
+[[bin]]
+name = "single"
+path = "src/single.rs"
+
+[[bin]]
+name = "double"
+path = "src/double.rs"
+
+[[bin]]
+name = "tx"
+path = "src/tx.rs"
+
+[[bin]]
+name = "triangle"
+path = "src/triangle.rs"
+
+[[bin]]
+name = "sin"
+path = "src/sin.rs"
