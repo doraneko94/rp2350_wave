@@ -38,3 +38,11 @@ path = "src/triangle.rs"
 [[bin]]
 name = "sin"
 path = "src/sin.rs"
+
+[[bin]]
+name = "song"
+path = "src/song.rs"
+
+[[bin]]
+name = "am"
+path = "src/am.rs"

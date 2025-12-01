@@ -11,14 +11,30 @@ use hal::pio::PIOExt;
 use hal::Sio;
 use hal::watchdog::Watchdog;
 
-use rp2350_wave::{DAC_MAX, dac_program, setup_dac};
+use rp2350_wave::{DAC_MAX, OUTPUT_HZ, dac_program, setup_dac};
+use rp2350_wave::music::*;
 
 const XTAL_FREQ_HZ: u32 = 12_000_000;
+const MEASURE_HZ: u32 = 1;
+const NUM_NOTES: usize = 41;
+const SCORE: [(Delta, u8); NUM_NOTES] = [
+    (D4, 4), (C4, 4), (D4, 4), (E4, 4),
+    (G4, 4), (E4, 4), (D4, 2),
+    (E4, 4), (G4, 4), (A4, 4), (G4, 8), (A4, 8),
+    (D5, 4), (B4, 4), (A4, 4), (G4, 4),
+    (E4, 4), (G4, 4), (A4, 2),
+    (D5, 4), (C5, 4), (D5, 2),
+    (E4, 4), (G4, 4), (A4, 4), (G4, 4),
+    (E4, 4), (E4, 8), (G4, 8), (D4, 2),
+    (A4, 4), (C5, 4), (D5, 2),
+    (C5, 4), (D5, 4), (A4, 4), (G4, 4),
+    (A4, 4), (G4, 4), (E4, 4), (D4, 4)
+];
 
-// sin(2 * pi * 100kHz / OUTPUT_HZ)
-const SIN_DELTA: f64 = 0.5877852522924731;
-// cos(2 * pi * 100kHz / OUTPUT_HZ)
-const COS_DELTA: f64 = 0.8090169943749475;
+// sin(2 * pi * 10kHz / OUTPUT_HZ)
+const SIN_DELTA: f64 = 0.06279051952931337;
+// cos(2 * pi * 10kHz / OUTPUT_HZ)
+const COS_DELTA: f64 = 0.9980267284282716;
 
 #[unsafe(link_section = ".start_block")]
 #[used]
@@ -61,24 +77,40 @@ fn main() -> ! {
     let _d11: Pin<_, FunctionPio0, _> = pins.gpio11.into_function();
 
     let program = dac_program();
-
     let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
     let installed = pio.install(&program).unwrap();
     
     let (sm, _, mut tx) = setup_dac(d0.id().num, hz, installed, sm0);
     sm.start();
 
-    let (mut sn, mut cn) = (0f64, 1f64);
+    let mut note_count: usize = 0;
+    let (mut sin_delta, mut cos_delta, mut duration) = decode_delta_duration(SCORE[0], OUTPUT_HZ, MEASURE_HZ);
+    let mut duration_count: u32 = 0;
+    let (mut sn0, mut cn0) = (0f64, 1f64);
+    let (mut sn1, mut cn1) = (0f64, 1f64);
     loop {
-        let s = sn * COS_DELTA + cn * SIN_DELTA;
-        let c = cn * COS_DELTA - sn * SIN_DELTA;
+        let s0 = sn0 * COS_DELTA + cn0 * SIN_DELTA;
+        let c0 = cn0 * COS_DELTA - sn0 * SIN_DELTA;
+
+        let s1 = sn1 * cos_delta + cn1 * sin_delta;
+        let c1 = cn1 * cos_delta - sn1 * sin_delta;
+
+        let s = s0 * s1;
         let s_shift = (s + 1.0).max(0.0) / 2.0;
         let output_f64 = DAC_MAX as f64 * s_shift;
         let output = (output_f64 as u32).min(DAC_MAX);
 
+        duration_count += 1;
+        if duration_count >= duration {
+            note_count += 1;
+            if note_count >= NUM_NOTES { note_count = 0; }
+            (sin_delta, cos_delta, duration) = decode_delta_duration(SCORE[note_count], OUTPUT_HZ, MEASURE_HZ)
+        }
+
         while tx.is_full() {}
         tx.write(output);
         
-        (sn, cn) = (s, c);
+        (sn0, cn0) = (s0, c0);
+        (sn1, cn1) = (s1, c1);
     }
 }
