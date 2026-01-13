@@ -144,7 +144,7 @@ fn main() -> ! {
     // 2 step
     a.bind(&mut wrap_target);
     a.pull(false, true);
-    a.out(pio::OutDestination::PINS, 32);
+    a.out(pio::OutDestination::PINS, 16);
     a.bind(&mut wrap_source);
 
     let program = a.assemble_with_wrap(wrap_source, wrap_target);
