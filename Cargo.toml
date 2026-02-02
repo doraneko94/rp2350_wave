@@ -58,3 +58,7 @@ path = "src/multi.rs"
 [[bin]]
 name = "usb"
 path = "src/usb.rs"
+
+[[bin]]
+name = "sph"
+path = "src/sph.rs"

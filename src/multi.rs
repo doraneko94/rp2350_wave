@@ -318,19 +318,16 @@ fn main() -> ! {
                     rq.enqueue(filled_idx).is_ok()
                 });
 
-                if pushed {
-                    // schedule the new buffer
-                    dma_next_idx = schedule_idx;
-                    unsafe { pool_buf_mut(schedule_idx) }
-                } else {
+                if !pushed {
                     critical_section::with(|cs| {
                         let mut fq = FREE_Q.borrow_ref_mut(cs);
                         let _ = fq.enqueue(filled_idx);
                     });
-
-                    dma_next_idx = schedule_idx;
-                    unsafe { pool_buf_mut(schedule_idx) }
+                    
                 }
+                // schedule the new buffer
+                dma_next_idx = schedule_idx;
+                unsafe { pool_buf_mut(schedule_idx) }
             } else {
                 dma_next_idx = filled_idx;
                 unsafe { pool_buf_mut(filled_idx) }
