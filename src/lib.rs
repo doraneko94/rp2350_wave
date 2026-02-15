@@ -11,7 +11,7 @@ use rp235x_hal as hal;
 pub const OUTPUT_HZ: u32 = 1_000_000;
 pub const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
 
-pub const N_DAC_BITS: u8 = 12;
+pub const N_DAC_BITS: u8 = 16;
 pub const DAC_MAX: u32 = (1 << N_DAC_BITS) - 1;
 
 pub fn dac_program() -> pio::Program<32> {
@@ -22,7 +22,7 @@ pub fn dac_program() -> pio::Program<32> {
     // 2 step
     a.bind(&mut wrap_target);
     a.pull(false, true);
-    a.out(pio::OutDestination::PINS, 32);
+    a.out(pio::OutDestination::PINS, 16);
     a.bind(&mut wrap_source);
 
     a.assemble_with_wrap(wrap_source, wrap_target)

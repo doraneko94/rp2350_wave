@@ -17,7 +17,6 @@ use rp235x_hal as hal;
 use hal::pac;
 use pac::interrupt;
 
-use hal::adc::AdcPin;
 use hal::clocks::ClockSource;
 use rp235x_hal::dma::{DMAExt, double_buffer, SingleChannel};
 use hal::gpio::{bank0, FunctionPio0, Pin, PullDown};
@@ -32,6 +31,14 @@ use usbd_serial::SerialPort;
 const XTAL_FREQ_HZ: u32 = 12_000_000;
 const DIV_INT_ULTRASONIC: u16 = 10;
 const DIV_INT_LOW_POWER: u16 = 75;
+
+const OUTPUT_HZ: u32 = 1_000_000;
+const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
+const SQUARE_HZ: u32 = 20_000;
+const OUTPUT_PER_SQUARE: u32 = OUTPUT_HZ / SQUARE_HZ;
+const SQUARE_HALF: u32 = OUTPUT_PER_SQUARE / 2;
+const COUNT_MAX: u32 = u32::MAX / OUTPUT_PER_SQUARE * OUTPUT_PER_SQUARE;
+const DAC_MAX: u32 = 65535;
 
 const WORDS_PER_BUF: usize = 2048;    // recommend >= 2048 to reduce IRQ rate
 const TOTAL_BYTES: usize = WORDS_PER_BUF * 4;
@@ -104,6 +111,50 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut p.RESETS,
     );
+
+    let pio_pins = (
+        pins.gpio0.into_function::<FunctionPio0>(),
+        pins.gpio1.into_function::<FunctionPio0>(),
+        pins.gpio2.into_function::<FunctionPio0>(),
+        pins.gpio3.into_function::<FunctionPio0>(),
+        pins.gpio4.into_function::<FunctionPio0>(),
+        pins.gpio5.into_function::<FunctionPio0>(),
+        pins.gpio6.into_function::<FunctionPio0>(),
+        pins.gpio7.into_function::<FunctionPio0>(),
+        pins.gpio8.into_function::<FunctionPio0>(),
+        pins.gpio9.into_function::<FunctionPio0>(),
+        pins.gpio10.into_function::<FunctionPio0>(),
+        pins.gpio11.into_function::<FunctionPio0>(),
+        pins.gpio12.into_function::<FunctionPio0>(),
+        pins.gpio13.into_function::<FunctionPio0>(),
+        pins.gpio14.into_function::<FunctionPio0>(),
+        pins.gpio15.into_function::<FunctionPio0>(),
+    );
+
+    let mut a = pio::Assembler::<32>::new();
+    let mut wrap_target = a.label();
+    let mut wrap_source = a.label();
+
+    // 2 step
+    a.bind(&mut wrap_target);
+    a.pull(false, true);
+    a.out(pio::OutDestination::PINS, 16);
+    a.bind(&mut wrap_source);
+
+    let program = a.assemble_with_wrap(wrap_source, wrap_target);
+
+    let (mut pio0, sm0, _, _, _) = p.PIO0.split(&mut p.RESETS);
+    let installed = pio0.install(&program).unwrap();
+
+    let mut mc = Multicore::new(&mut p.PSM, &mut p.PPB, &mut sio.fifo);
+    let cores = mc.cores();
+    let core1 = &mut cores[1];
+
+    core1
+        .spawn(CORE1_STACK.take().unwrap(), move || {
+            core1_pio_task(sm0, installed, pio_pins, sys_hz)
+        })
+        .unwrap();
 
     let dat_pin = pins.gpio16.into_function::<FunctionPio1>();
     let clk_pin = pins.gpio17.into_function::<FunctionPio1>();
@@ -332,5 +383,67 @@ fn main() -> ! {
 
             transfer = next.write_next(sched_buf);
         }
+    }
+}
+
+fn core1_pio_task(
+    sm0: hal::pio::UninitStateMachine<(hal::pac::PIO0, hal::pio::SM0)>,
+    installed: InstalledProgram<hal::pac::PIO0>,
+    pio_pins: (
+        Pin<bank0::Gpio0, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio1, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio2, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio3, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio4, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio5, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio6, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio7, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio8, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio9, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio10, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio11, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio12, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio13, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio14, FunctionPio0, PullDown>,
+        Pin<bank0::Gpio15, FunctionPio0, PullDown>,
+    ),
+    sys_hz: u32
+) -> ! {
+    let d0 = pio_pins.0;
+    let _d1 = pio_pins.1;
+    let _d2 = pio_pins.2;
+    let _d3 = pio_pins.3;
+    let _d4 = pio_pins.4;
+    let _d5 = pio_pins.5;
+    let _d6 = pio_pins.6;
+    let _d7 = pio_pins.7;
+    let _d8 = pio_pins.8;
+    let _d9 = pio_pins.9;
+    let _d10 = pio_pins.10;
+    let _d11 = pio_pins.11;
+    let _d12 = pio_pins.12;
+    let _d13 = pio_pins.13;
+    let _d14 = pio_pins.14;
+    let _d15 = pio_pins.15;
+
+    let int = (sys_hz / PROGRAM_STEP_HZ) as u16;
+    let rem = sys_hz % PROGRAM_STEP_HZ;
+    let frac = ((rem * 256) / PROGRAM_STEP_HZ) as u8;
+    let (mut sm, _, mut tx) = hal::pio::PIOBuilder::from_installed_program(installed)
+        .out_pins(d0.id().num, 16)
+        .clock_divisor_fixed_point(int, frac)
+        .build(sm0);
+    sm.set_pindirs((0..16 as u8).map(|pin| (pin, hal::pio::PinDir::Output)));
+    sm.start();
+
+    let mut count: u32 = 0;
+    loop {
+        let output = if (count / SQUARE_HALF) % 2 == 0 { DAC_MAX } else { 0 };
+
+        while tx.is_full() {}
+        tx.write(output);
+        
+        count = count.wrapping_add(1);
+        if count >= COUNT_MAX { count = 0; }
     }
 }
