@@ -62,3 +62,11 @@ path = "src/usb.rs"
 [[bin]]
 name = "sph"
 path = "src/sph.rs"
+
+[[bin]]
+name = "sph_slow"
+path = "src/sph_slow.rs"
+
+[[bin]]
+name = "sine"
+path = "src/sine.rs"
