@@ -29,18 +29,20 @@ use usbd_serial::SerialPort;
 
 const XTAL_FREQ_HZ: u32 = 12_000_000;
 
-const OUTPUT_HZ: u32 = 1_000_000;
+const OUTPUT_HZ: u32 = 100_000;
 const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
-const SQUARE_HZ: u32 = 1;
+const SQUARE_HZ: u32 = 100_000;
 const OUTPUT_PER_SQUARE: u32 = OUTPUT_HZ / SQUARE_HZ;
 const SQUARE_HALF: u32 = OUTPUT_PER_SQUARE / 2;
 const COUNT_MAX: u32 = u32::MAX / OUTPUT_PER_SQUARE * OUTPUT_PER_SQUARE;
 const DAC_MAX: u32 = 65535;
 
 // sin(2 * pi * 100Hz / OUTPUT_HZ)
-const SIN_DELTA: f64 = 0.0006283184893762572;
+// const SIN_DELTA: f64 = 0.00628314396555895;
 // cos(2 * pi * 100Hz / OUTPUT_HZ)
-const COS_DELTA: f64 = 0.9999998026079184;
+// const COS_DELTA: f64 = 0.9999802608561371;
+const SIN_DELTA: f64 = 0.5877852522924731;
+const COS_DELTA: f64 = 0.8090169943749475;
 
 const ADC_SAMPLES_PER_BUF: usize = 2048;    // recommend >= 2048 to reduce IRQ rate
 const N_BUFS: usize = 8;                    // >= 6..12 recommended for burst absorption
@@ -384,7 +386,7 @@ fn core1_pio_task(
     let frac = ((rem * 256) / PROGRAM_STEP_HZ) as u8;
     let (mut sm, _, mut tx) = hal::pio::PIOBuilder::from_installed_program(installed)
         .out_pins(d0.id().num, 16)
-        .clock_divisor_fixed_point(int, frac)
+        .clock_divisor_fixed_point(750, 0)
         .build(sm0);
     sm.set_pindirs((0..16 as u8).map(|pin| (pin, hal::pio::PinDir::Output)));
     sm.start();

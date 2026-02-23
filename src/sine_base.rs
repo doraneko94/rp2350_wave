@@ -30,12 +30,12 @@ use usbd_serial::SerialPort;
 
 const XTAL_FREQ_HZ: u32 = 12_000_000;
 
-const OUTPUT_HZ: u32 = 1_000_000;
+const OUTPUT_HZ: u32 = 20_000_000;
 const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
 
 const LUT_BITS: u32 = 12;
 const LUT_LEN: usize = 1 << LUT_BITS;
-const DDS_HZ_DEFAULT: u32 = 10_000;
+const DDS_HZ_DEFAULT: u32 = 100;
 
 const ADC_SAMPLES_PER_BUF: usize = 2048;    // recommend >= 2048 to reduce IRQ rate
 const N_BUFS: usize = 8;                    // >= 6..12 recommended for burst absorption
@@ -432,13 +432,14 @@ fn core1_dds_pio_dma_task(
     let mut tx_transfer = double_buffer::Config::new((ch_a, ch_b), b0, tx)
         .start()
         .read_next(b1);
+    
     loop {
-		let (done_buf, next) = tx_transfer.wait();
-
-		fill_dds_block_interp(&mut lane0, phase_step, done_buf);
-
-		tx_transfer = next.read_next(done_buf);
-	}
+        if tx_transfer.is_done() {
+            let (done_buf, next) = tx_transfer.wait();
+            fill_dds_block_interp(&mut lane0, phase_step, done_buf);
+            tx_transfer = next.read_next(done_buf);
+        }
+    }
 }
 
 #[inline(always)]
