@@ -32,7 +32,7 @@ const XTAL_FREQ_HZ: u32 = 12_000_000;
 const DIV_INT_ULTRASONIC: u16 = 10;
 const DIV_INT_LOW_POWER: u16 = 75;
 
-const OUTPUT_HZ: u32 = 1_000_000;
+const OUTPUT_HZ: u32 = 100_000;
 const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
 const SQUARE_HZ: u32 = 20_000;
 const OUTPUT_PER_SQUARE: u32 = OUTPUT_HZ / SQUARE_HZ;
@@ -156,9 +156,9 @@ fn main() -> ! {
         })
         .unwrap();
 
-    let dat_pin = pins.gpio16.into_function::<FunctionPio1>();
-    let clk_pin = pins.gpio17.into_function::<FunctionPio1>();
-    let mut vdd_pin = pins.gpio18.into_push_pull_output();
+    let dat_pin = pins.gpio20.into_function::<FunctionPio1>();
+    let clk_pin = pins.gpio21.into_function::<FunctionPio1>();
+    let mut vdd_pin = pins.gpio22.into_push_pull_output();
     let _ = vdd_pin.set_low();
 
     let side_set = pio::SideSet::new(false, 1, false);

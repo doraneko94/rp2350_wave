@@ -27,22 +27,27 @@ use hal::watchdog::Watchdog;
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
+const WAVE_MODE: WaveMode = WaveMode::Sin;
+#[allow(dead_code)]
+enum WaveMode {
+    Square,
+    Sin
+}
+
 const XTAL_FREQ_HZ: u32 = 12_000_000;
 
 const OUTPUT_HZ: u32 = 100_000;
 const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
-const SQUARE_HZ: u32 = 100_000;
+const SQUARE_HZ: u32 = 10_000;
 const OUTPUT_PER_SQUARE: u32 = OUTPUT_HZ / SQUARE_HZ;
 const SQUARE_HALF: u32 = OUTPUT_PER_SQUARE / 2;
 const COUNT_MAX: u32 = u32::MAX / OUTPUT_PER_SQUARE * OUTPUT_PER_SQUARE;
 const DAC_MAX: u32 = 65535;
 
 // sin(2 * pi * 100Hz / OUTPUT_HZ)
-// const SIN_DELTA: f64 = 0.00628314396555895;
+const SIN_DELTA: f64 = 0.00628314396555895;
 // cos(2 * pi * 100Hz / OUTPUT_HZ)
-// const COS_DELTA: f64 = 0.9999802608561371;
-const SIN_DELTA: f64 = 0.5877852522924731;
-const COS_DELTA: f64 = 0.8090169943749475;
+const COS_DELTA: f64 = 0.9999802608561371;
 
 const ADC_SAMPLES_PER_BUF: usize = 2048;    // recommend >= 2048 to reduce IRQ rate
 const N_BUFS: usize = 8;                    // >= 6..12 recommended for burst absorption
@@ -165,8 +170,8 @@ fn main() -> ! {
         })
         .unwrap();
 
-    let adc_gpio26 = pins.gpio26.into_floating_input();
-    let mut adc_pin = AdcPin::new(adc_gpio26).unwrap();
+    let adc_gpio28 = pins.gpio28.into_floating_input();
+    let mut adc_pin = AdcPin::new(adc_gpio28).unwrap();
     let mut adc = hal::Adc::new(p.ADC, &mut p.RESETS);
     
     let mut dch = p.DMA.dyn_split(&mut p.RESETS);
@@ -386,33 +391,39 @@ fn core1_pio_task(
     let frac = ((rem * 256) / PROGRAM_STEP_HZ) as u8;
     let (mut sm, _, mut tx) = hal::pio::PIOBuilder::from_installed_program(installed)
         .out_pins(d0.id().num, 16)
-        .clock_divisor_fixed_point(750, 0)
+        .clock_divisor_fixed_point(int, frac)
         .build(sm0);
     sm.set_pindirs((0..16 as u8).map(|pin| (pin, hal::pio::PinDir::Output)));
     sm.start();
 
-    /*let mut count: u32 = 0;
-    loop {
-        let output = if (count / SQUARE_HALF) % 2 == 0 { DAC_MAX } else { 0 };
+    match WAVE_MODE {
+        WaveMode::Square => {
+            let mut count: u32 = 0;
+            loop {
+                let output = if (count / SQUARE_HALF) % 2 == 0 { DAC_MAX } else { 0 };
 
-        while tx.is_full() {}
-        tx.write(output);
-        
-        count = count.wrapping_add(1);
-        if count >= COUNT_MAX { count = 0; }
-    }*/
-    let (mut sn, mut cn) = (0f64, 1f64);
-    loop {
-        let s = sn * COS_DELTA + cn * SIN_DELTA;
-        let c = cn * COS_DELTA - sn * SIN_DELTA;
-        let s_shift = (s + 1.0).max(0.0) / 2.0;
-        let output_f64 = u16::MAX as f64 * s_shift;
-        let output = (output_f64 as u32).min(u16::MAX as u32);
+                while tx.is_full() {}
+                tx.write(output);
+                
+                count = count.wrapping_add(1);
+                if count >= COUNT_MAX { count = 0; }
+            }
+        }
+        WaveMode::Sin => {
+            let (mut sn, mut cn) = (0f64, 1f64);
+            loop {
+                let s = sn * COS_DELTA + cn * SIN_DELTA;
+                let c = cn * COS_DELTA - sn * SIN_DELTA;
+                let s_shift = (s + 1.0).max(0.0) / 2.0;
+                let output_f64 = u16::MAX as f64 * s_shift;
+                let output = (output_f64 as u32).min(u16::MAX as u32);
 
-        while tx.is_full() {}
-        tx.write(output);
-        
-        (sn, cn) = (s, c);
+                while tx.is_full() {}
+                tx.write(output);
+                
+                (sn, cn) = (s, c);
+            }
+        }
     }
 }
 
