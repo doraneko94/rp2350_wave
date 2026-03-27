@@ -72,5 +72,13 @@ name = "sine"
 path = "src/sine.rs"
 
 [[bin]]
+name = "sine_input"
+path = "src/sine_input.rs"
+
+[[bin]]
+name = "sine_fix"
+path = "src/sine_fix.rs"
+
+[[bin]]
 name = "pdm"
 path = "src/pdm.rs"

@@ -4,21 +4,16 @@
 use panic_halt as _;
 use rp235x_hal::sio::{Lane, LaneCtrl};
 
-use core::cell::{RefCell, UnsafeCell};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use cortex_m::peripheral::NVIC;
-use critical_section::Mutex;
 use embedded_hal::digital::OutputPin;
-use heapless::spsc::Queue;
+use heapless::String;
 
 use rp235x_hal as hal;
-use hal::pac;
-use pac::interrupt;
 
-use hal::adc::AdcPin;
 use hal::clocks::ClockSource;
-use rp235x_hal::dma::{DMAExt, double_buffer, SingleChannel};
+use rp235x_hal::dma::{DMAExt, double_buffer};
 use hal::gpio::{bank0, FunctionPio0, Pin, PullDown};
 use hal::multicore::{Multicore, Stack};
 use hal::pio::{InstalledProgram, PIOExt};
@@ -35,61 +30,18 @@ const PROGRAM_STEP_HZ: u32 = OUTPUT_HZ * 2;
 
 const LUT_BITS: u32 = 12;
 const LUT_LEN: usize = 1 << LUT_BITS;
-const DDS_HZ_DEFAULT: u32 = 10_000;
 
-const ADC_SAMPLES_PER_BUF: usize = 2048;    // recommend >= 2048 to reduce IRQ rate
-const N_BUFS: usize = 8;                    // >= 6..12 recommended for burst absorption
-const TX_CHUNK: usize = 384;
+const DDS_HZ_DEFAULT: u32 = 1_000;
 
-const _: () = {
-    assert!(ADC_SAMPLES_PER_BUF % 2 == 0);
-    assert!(TX_CHUNK % 3 == 0);
-};
+const DDS_BUF_SAMPLES: usize = 1024;
+
+static CORE1_STACK: Stack<4096> = Stack::new();
+
+static DDS_FREQ: AtomicU32 = AtomicU32::new(DDS_HZ_DEFAULT);
 
 #[unsafe(link_section = ".start_block")]
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
-
-static CORE1_STACK: Stack<4096> = Stack::new();
-
-static DMA_DONE: AtomicBool = AtomicBool::new(false);
-
-// Multi-buffer pool (DMA writes here)
-// static mut ADC_BUFS: [[u16; ADC_SAMPLES_PER_BUF]; N_BUFS] = [[0; ADC_SAMPLES_PER_BUF]; N_BUFS];
-// ====== Buffer pool without `static mut` (Rust 2024 friendly) ======
-struct AdcPool(UnsafeCell<[[u16; ADC_SAMPLES_PER_BUF]; N_BUFS]>);
-unsafe impl Sync for AdcPool {} // we will enforce safety via our own index discipline
-
-static ADC_POOL: AdcPool = AdcPool(UnsafeCell::new([[0; ADC_SAMPLES_PER_BUF]; N_BUFS]));
-
-// Indices queues
-static FREE_Q: Mutex<RefCell<Queue<usize, N_BUFS>>> = Mutex::new(RefCell::new(Queue::new()));
-static READY_Q: Mutex<RefCell<Queue<usize, N_BUFS>>> = Mutex::new(RefCell::new(Queue::new()));
-
-// SAFETY: caller must ensure no aliasing of the same idx (our DMA/queue discipline does that)
-#[inline(always)]
-unsafe fn pool_buf_mut(idx: usize) -> &'static mut [u16; ADC_SAMPLES_PER_BUF] {
-    unsafe { &mut (*ADC_POOL.0.get())[idx] }
-}
-// SAFETY: caller must ensure this buffer is not being mutated concurrently (READY_Q buffers are not in DMA)
-#[inline(always)]
-unsafe fn pool_buf_ref(idx: usize) -> &'static [u16; ADC_SAMPLES_PER_BUF] {
-    unsafe { &(*ADC_POOL.0.get())[idx] }
-}
-
-#[allow(non_snake_case)]
-#[cortex_m_rt::interrupt]
-fn DMA_IRQ_0() {
-    DMA_DONE.store(true, core::sync::atomic::Ordering::Release);
-
-    let dma = unsafe { &*pac::DMA::ptr() };
-    unsafe {
-        // ch0 + ch1
-        dma.ints0().write(|w| w.bits((1 << 0) | (1 << 1)));
-    }
-}
-
-const DDS_BUF_SAMPLES: usize = 1024;
 
 struct DdsPool(UnsafeCell<[[u32; DDS_BUF_SAMPLES]; 2]>);
 unsafe impl Sync for DdsPool {}
@@ -102,26 +54,29 @@ unsafe fn dds_buf_mut(i: usize) -> &'static mut [u32; DDS_BUF_SAMPLES] {
 
 #[hal::entry]
 fn main() -> ! {
+
     let mut p = hal::pac::Peripherals::take().unwrap();
     let mut watchdog = Watchdog::new(p.WATCHDOG);
 
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
-        p.XOSC, 
-        p.CLOCKS, 
-        p.PLL_SYS, 
-        p.PLL_USB, 
-        &mut p.RESETS, 
+        p.XOSC,
+        p.CLOCKS,
+        p.PLL_SYS,
+        p.PLL_USB,
+        &mut p.RESETS,
         &mut watchdog
     ).ok().unwrap();
+
     let sys_hz = clocks.system_clock.get_freq().to_Hz();
 
     let mut sio = Sio::new(p.SIO);
+
     let pins = hal::gpio::Pins::new(
         p.IO_BANK0,
         p.PADS_BANK0,
         sio.gpio_bank0,
-        &mut p.RESETS,
+        &mut p.RESETS
     );
 
     let pio_pins = (
@@ -147,7 +102,6 @@ fn main() -> ! {
     let mut wrap_target = a.label();
     let mut wrap_source = a.label();
 
-    // 2 step
     a.bind(&mut wrap_target);
     a.pull(false, true);
     a.out(pio::OutDestination::PINS, 16);
@@ -159,8 +113,6 @@ fn main() -> ! {
     let installed = pio0.install(&program).unwrap();
 
     let mut dch = p.DMA.dyn_split(&mut p.RESETS);
-    let mut adc_ch0 = dch.ch0.take().unwrap();
-    let mut adc_ch1 = dch.ch1.take().unwrap();
 
     let pio_ch2 = dch.ch2.take().unwrap();
     let pio_ch3 = dch.ch3.take().unwrap();
@@ -171,63 +123,17 @@ fn main() -> ! {
 
     let interp0 = sio.interp0;
 
-    core1
-        .spawn(CORE1_STACK.take().unwrap(), move || {
-            core1_dds_pio_dma_task(
-                sm0, 
-                installed, 
-                pio_pins, 
-                sys_hz,
-                interp0,
-                pio_ch2,
-                pio_ch3
-            )
-        })
-        .unwrap();
-
-    let adc_gpio26 = pins.gpio26.into_floating_input();
-    let mut adc_pin = AdcPin::new(adc_gpio26).unwrap();
-    let mut adc = hal::Adc::new(p.ADC, &mut p.RESETS);
-    
-    adc_ch0.enable_irq0();
-    adc_ch1.enable_irq0();
-    unsafe { NVIC::unmask(pac::Interrupt::DMA_IRQ_0) };
-
-    let mut fifo = adc
-        .build_fifo()
-        .clock_divider(0, 0)
-        .set_channel(&mut adc_pin)
-        .enable_dma()
-        .start_paused();
-
-    // ====== Init free/ready queues ======
-    critical_section::with(|cs| {
-        let mut fq = FREE_Q.borrow_ref_mut(cs);
-        for i in 0..N_BUFS {
-            let _ = fq.enqueue(i);
-        }
-    });
-
-    // Take 2 buffers for ping-pong DMA
-    let (idx0, idx1) = critical_section::with(|cs| {
-        let mut fq = FREE_Q.borrow_ref_mut(cs);
-        (fq.dequeue().unwrap(), fq.dequeue().unwrap())
-    });
-
-    let buf0: &'static mut [u16; ADC_SAMPLES_PER_BUF] = unsafe { pool_buf_mut(idx0) };
-    let buf1: &'static mut [u16; ADC_SAMPLES_PER_BUF] = unsafe { pool_buf_mut(idx1) };
-
-    // Track which indices correspond to DMA ping/pong sequencing.
-    // - dma_cur_idx: the one that just finished on wait()
-    // - dma_next_idx: the one currently being filled (already queued)
-    let mut dma_cur_idx: usize = idx0;
-    let mut dma_next_idx: usize = idx1;
-
-    let mut transfer = double_buffer::Config::new(
-        (adc_ch0, adc_ch1), 
-        fifo.dma_read_target(), 
-        buf0
-    ).start().write_next(buf1);
+    core1.spawn(CORE1_STACK.take().unwrap(), move || {
+        core1_dds_pio_dma_task(
+            sm0,
+            installed,
+            pio_pins,
+            sys_hz,
+            interp0,
+            pio_ch2,
+            pio_ch3
+        )
+    }).unwrap();
 
     let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
         p.USB,
@@ -236,124 +142,195 @@ fn main() -> ! {
         true,
         &mut p.RESETS
     ));
+
     let mut serial = SerialPort::new(&usb_bus);
 
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x2E8A, 0x000A))
         .device_class(usbd_serial::USB_CLASS_CDC)
-        .max_packet_size_0(64).expect("bad EP0 packet size")
+        .max_packet_size_0(64).unwrap()
         .strings(&[
-            StringDescriptors::new(LangID::EN_US) // EN_GBにすると死ぬ
+            StringDescriptors::new(LangID::EN_US)
                 .manufacturer("Example")
-                .product("Pico2 ADC DMA")
+                .product("DDS Generator")
                 .serial_number("0001")
-        ]).expect("failed to set USB strings")
+        ]).unwrap()
         .build();
 
+    let mut rx_buf = [0u8; 64];
+    let mut cmd = String::<16>::new();
+
+    let mut configured = false;
+
     let mut led_pin = pins.gpio25.into_push_pull_output();
-    let _ = led_pin.set_high().ok();
-
-    let mut adc_started = false;
-
-    // Current buffer being transmitted
-    let mut cur_tx_idx: Option<usize> = None;
-    let mut cur_samp_off: usize = 0;
-
-    // Small packed TX staging (no full-buffer copy)
-    let mut tx_chunk = [0u8; TX_CHUNK];
-    let mut tx_chunk_len: usize = 0;
-    let mut tx_chunk_off: usize = 0;
+    let _ = led_pin.set_high();
 
     loop {
-        let _ = usb_dev.poll(&mut [&mut serial]);
-
-        if !adc_started && usb_dev.state() == UsbDeviceState::Configured {
-            fifo.resume();
-            adc_started = true;
+        if !usb_dev.poll(&mut [&mut serial]) {
+            continue;
         }
 
-        // === 1) USB TX: if stagged chunk exists, flush it ===
-        if tx_chunk_off < tx_chunk_len {
-            match serial.write(&tx_chunk[tx_chunk_off..tx_chunk_len]) {
-                Ok(0) | Err(_) => {}
-                Ok(n) => {
-                    tx_chunk_off += n;
-                    if tx_chunk_off >= tx_chunk_len {
-                        tx_chunk_off = 0;
-                        tx_chunk_len = 0;
+        if usb_dev.state() == UsbDeviceState::Configured && !configured {
+
+            configured = true;
+
+            let f = DDS_FREQ.load(Ordering::Relaxed);
+
+            let mut buf = String::<32>::new();
+            let _ = core::fmt::write(&mut buf, format_args!("Freq: {}\r\n> ", f));
+
+            usb_write(&mut serial, &buf);
+        }
+
+        if let Ok(count) = serial.read(&mut rx_buf) {
+
+            for &b in &rx_buf[..count] {
+
+                match b {
+
+                    b'\r' | b'\n' => {
+
+                        usb_write(&mut serial, "\r\n");
+
+                        if let Some(mut v) = parse_freq(&cmd) {
+
+                            if v > 200000 { v = 200000; }
+                            if v < 100 { v = 100; }
+
+                            DDS_FREQ.store(v, Ordering::Relaxed);
+
+                            let mut buf = String::<32>::new();
+
+                            buf.push_str("Freq: ").ok();
+                            format_freq(v, &mut buf);
+                            buf.push_str("\r\n> ").ok();
+
+                            usb_write(&mut serial, &buf);
+
+                        } else {
+
+                            usb_write(&mut serial, "Invalid\r\n> ");
+                        }
+
+                        cmd.clear();
+                    }
+
+                    8 | 127 => {
+
+                        if !cmd.is_empty() {
+                            cmd.pop();
+                            usb_write(&mut serial, "\x08 \x08");
+                        }
+                    }
+
+                    _ => {
+
+                        if cmd.push(b as char).is_ok() {
+                            let _ = serial.write(&[b]);
+                        }
                     }
                 }
             }
-        } else {
-            // === 2) No stagged chunk: build next packed chunk from ready buffers ===
+        }
+    }
+}
 
-            // If no current buffer, grab one from READY_Q
-            if cur_tx_idx.is_none() {
-                cur_tx_idx = critical_section::with(|cs| {
-                    let mut rq = READY_Q.borrow_ref_mut(cs);
-                    rq.dequeue()
-                });
-                cur_samp_off = 0;
-            }
+fn usb_write(serial: &mut SerialPort<'_, hal::usb::UsbBus>, s: &str) {
+    let mut bytes = s.as_bytes();
+    while !bytes.is_empty() {
+        match serial.write(bytes) {
+            Ok(n) => bytes = &bytes[n..],
+            Err(_) => {}
+        }
+    }
+}
 
-            if let Some(idx) = cur_tx_idx {
-                let src = unsafe { pool_buf_ref(idx) };
-                let produced = pack_12bit_pairs_into(
-                    src, &mut cur_samp_off, &mut tx_chunk
-                );
+fn parse_freq(s: &str) -> Option<u32> {
 
-                if produced > 0 {
-                    tx_chunk_len = produced;
-                    tx_chunk_off = 0;
-                } else {
-                    critical_section::with(|cs| {
-                        let mut fq = FREE_Q.borrow_ref_mut(cs);
-                        let _ = fq.enqueue(idx);
-                    });
-                    cur_tx_idx = None;
-                    cur_samp_off = 0;
+    let s = s.trim();
+
+    if s.is_empty() {
+        return Some(DDS_FREQ.load(Ordering::Relaxed));
+    }
+
+    let mut mult = 1;
+
+    let mut body = s;
+
+    if let Some(pos) = s.find(['k','K']) {
+        mult = 1000;
+        body = &s[..pos];
+    }
+
+    if let Some(dot) = body.find('.') {
+
+        let (left, right) = body.split_at(dot);
+        let right = &right[1..];
+
+        let int_part: u32 = if left.is_empty() { 0 } else { left.parse().ok()? };
+        let frac_part: u32 = right.parse().ok()?;
+
+        let scale = 10u32.pow(right.len() as u32);
+
+        let value =
+            int_part * mult +
+            (frac_part * mult) / scale;
+
+        return Some(value);
+
+    } else {
+
+        let mut v: u32 = body.parse().ok()?;
+
+        if mult == 1000 {
+
+            if let Some(pos) = s.find(['k','K']) {
+
+                let tail = &s[pos+1..];
+
+                if !tail.is_empty() {
+
+                    let frac: u32 = tail.parse().ok()?;
+                    let scale = 10u32.pow(tail.len() as u32);
+
+                    v = v * 1000 + (frac * 1000) / scale;
+                    return Some(v);
                 }
             }
+
+            return Some(v * 1000);
         }
 
-        // === 3) DMA completion handling ===
-        if DMA_DONE.swap(false, Ordering::AcqRel) {
-            let (_filled_buf, next) = transfer.wait();
+        return Some(v);
+    }
+}
 
-            // The finished buffer index is known by sequencing, not by pointer probing.
-            let filled_idx = dma_cur_idx;
+fn format_freq(freq: u32, out: &mut String<32>) {
 
-            // After wait(), the "current" for the next cycle is what used to be dma_next_idx.
-            dma_cur_idx = dma_next_idx;
+    if freq < 1000 {
 
-            // Try to get a new buffer to schedule after the one currently being filled.
-            let schedule_idx_opt = critical_section::with(|cs| {
-                let mut fq = FREE_Q.borrow_ref_mut(cs);
-                fq.dequeue()
-            });
+        let _ = core::fmt::write(out, format_args!("{}", freq));
 
-            let sched_buf = if let Some(schedule_idx) = schedule_idx_opt {
-                // We have a fresh buffer to schedule, so we can keep filled_idx (if READY_Q has space).
-                let pushed = critical_section::with(|cs| {
-                    let mut rq = READY_Q.borrow_ref_mut(cs);
-                    rq.enqueue(filled_idx).is_ok()
-                });
+    } else {
 
-                if !pushed {
-                    critical_section::with(|cs| {
-                        let mut fq = FREE_Q.borrow_ref_mut(cs);
-                        let _ = fq.enqueue(filled_idx);
-                    });
-                    
-                }
-                // schedule the new buffer
-                dma_next_idx = schedule_idx;
-                unsafe { pool_buf_mut(schedule_idx) }
-            } else {
-                dma_next_idx = filled_idx;
-                unsafe { pool_buf_mut(filled_idx) }
-            };
+        let k = freq / 1000;
+        let r = freq % 1000;
 
-            transfer = next.write_next(sched_buf);
+        if r == 0 {
+
+            let _ = core::fmt::write(out, format_args!("{}k", k));
+
+        } else if r % 100 == 0 {
+
+            let _ = core::fmt::write(out, format_args!("{}.{}k", k, r / 100));
+
+        } else if r % 10 == 0 {
+
+            let _ = core::fmt::write(out, format_args!("{}.{:02}k", k, r / 10));
+
+        } else {
+
+            let _ = core::fmt::write(out, format_args!("{}.{:03}k", k, r));
+
         }
     }
 }
@@ -384,61 +361,65 @@ fn core1_dds_pio_dma_task(
     ch_a: hal::dma::Channel<hal::dma::CH2>,
     ch_b: hal::dma::Channel<hal::dma::CH3>,
 ) -> ! {
+
     let d0 = pio_pins.0;
-    let _d1 = pio_pins.1;
-    let _d2 = pio_pins.2;
-    let _d3 = pio_pins.3;
-    let _d4 = pio_pins.4;
-    let _d5 = pio_pins.5;
-    let _d6 = pio_pins.6;
-    let _d7 = pio_pins.7;
-    let _d8 = pio_pins.8;
-    let _d9 = pio_pins.9;
-    let _d10 = pio_pins.10;
-    let _d11 = pio_pins.11;
-    let _d12 = pio_pins.12;
-    let _d13 = pio_pins.13;
-    let _d14 = pio_pins.14;
-    let _d15 = pio_pins.15;
 
     let int = (sys_hz / PROGRAM_STEP_HZ) as u16;
     let rem = sys_hz % PROGRAM_STEP_HZ;
     let frac = ((rem * 256) / PROGRAM_STEP_HZ) as u8;
+
     let (mut sm, _rx, tx) = hal::pio::PIOBuilder::from_installed_program(installed)
         .out_pins(d0.id().num, 16)
         .clock_divisor_fixed_point(int, frac)
         .build(sm0);
+
     sm.set_pindirs((0..16u8).map(|pin| (pin, hal::pio::PinDir::Output)));
     sm.start();
 
     let mut lane0 = interp0.get_lane0();
+
     let ctrl = LaneCtrl {
         shift: (32 - LUT_BITS) as u8,
         mask_lsb: 0,
         mask_msb: (LUT_BITS as u8) - 1,
         ..LaneCtrl::new()
     };
+
     lane0.set_ctrl(ctrl.encode());
     lane0.set_base(0);
     lane0.set_accum(0);
 
-    let phase_step: u32 = (((DDS_HZ_DEFAULT as u64) << 32) / (OUTPUT_HZ as u64)) as u32;
-
     let b0 = unsafe { dds_buf_mut(0) };
     let b1 = unsafe { dds_buf_mut(1) };
-    fill_dds_block_interp(&mut lane0, phase_step, b0);
-    fill_dds_block_interp(&mut lane0, phase_step, b1);
 
-    let mut tx_transfer = double_buffer::Config::new((ch_a, ch_b), b0, tx)
-        .start()
-        .read_next(b1);
+    let mut freq = DDS_FREQ.load(Ordering::Relaxed);
+    let mut step = (((freq as u64) << 32) / OUTPUT_HZ as u64) as u32;
+
+    fill_dds_block_interp(&mut lane0, step, b0);
+    fill_dds_block_interp(&mut lane0, step, b1);
+
+    let mut tx_transfer =
+        double_buffer::Config::new((ch_a, ch_b), b0, tx)
+            .start()
+            .read_next(b1);
+
     loop {
-		let (done_buf, next) = tx_transfer.wait();
 
-		fill_dds_block_interp(&mut lane0, phase_step, done_buf);
+        let new_freq = DDS_FREQ.load(Ordering::Relaxed);
 
-		tx_transfer = next.read_next(done_buf);
-	}
+        if new_freq != freq {
+
+            freq = new_freq;
+            step = (((freq as u64) << 32) / OUTPUT_HZ as u64) as u32;
+
+        }
+
+        let (done_buf, next) = tx_transfer.wait();
+
+        fill_dds_block_interp(&mut lane0, step, done_buf);
+
+        tx_transfer = next.read_next(done_buf);
+    }
 }
 
 #[inline(always)]
@@ -448,60 +429,14 @@ fn fill_dds_block_interp(
     out: &mut [u32; DDS_BUF_SAMPLES],
 ) {
     for w in out.iter_mut() {
+
         lane0.add_accum(step);
 
-		let idx = (lane0.peek() as usize) & (LUT_LEN - 1);
-		let s = SINE_LUT[idx] as u32;
-		*w = s;
+        let idx = (lane0.peek() as usize) & (LUT_LEN - 1);
+
+        *w = SINE_LUT[idx] as u32;
     }
 }
-
-// ====== 12-bit packing: 2 samples -> 3 bytes ======
-#[inline(always)]
-fn pack2x12bits_to_3bytes(s0: u16, s1: u16) -> [u8; 3] {
-    let a = s0 & 0x0FFF;
-    let b = s1 & 0x0FFF;
-
-    let b0 = (a & 0x00FF) as u8;
-    let b1 = ((a >> 8) as u8 & 0x0F) | (((b as u8) & 0x0F) << 4);
-    let b2 = (b >> 4) as u8;
-
-    [b0, b1, b2]
-}
-
-/// Pack src (u16) into dst (u8) as 12-bit pairs
-/// - src_off: u16 index, advances by 2
-/// - returns produced byte count (0 => finished this src buffer)
-fn pack_12bit_pairs_into(
-    src: &[u16; ADC_SAMPLES_PER_BUF],
-    src_off: &mut usize,
-    dst: &mut [u8],
-) -> usize {
-    let mut w = 0usize;
-    let cap_pairs = dst.len() / 3;
-
-    let mut pairs = 0usize;
-    while pairs < cap_pairs {
-        if *src_off + 1 >= src.len() {
-            break;
-        }
-
-        let s0 = src[*src_off];
-        let s1 = src[*src_off + 1];
-        let b = pack2x12bits_to_3bytes(s0, s1);
-
-        dst[w] = b[0];
-        dst[w + 1] = b[1];
-        dst[w + 2] = b[2];
-
-        w += 3;
-        *src_off += 2;
-        pairs += 1;
-    }
-
-    w
-}
-
 #[unsafe(link_section = ".data")]
 static SINE_LUT: [u16; LUT_LEN] = [
 	32768, 32818, 32868, 32918, 32969, 33019, 33069, 33119,
